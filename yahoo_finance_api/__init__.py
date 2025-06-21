@@ -31,8 +31,13 @@ class YahooFinance:
             params = {'range': result_range, 'interval': interval}
 
         # sending get request and saving the response as response object
+        ### update Eddie
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        
         url = "https://query1.finance.yahoo.com/v8/finance/chart/{}".format(ticker)
-        r = requests.get(url=url, params=params)
+        r = requests.get(url=url, params=params, headers=headers)
         data = r.json()
         # Getting data from json
         error = data['chart']['error']
@@ -50,6 +55,7 @@ class YahooFinance:
         timestamps = data['chart']['result'][0]['timestamp']
         # Formatting date from epoch to local time
         timestamps = [_time.strftime('%a, %d %b %Y %H:%M:%S', _time.localtime(x)) for x in timestamps]
+        # timestamps = [_time.strftime('%a, %d %b %Y %H:%M:%S') for x in timestamps]
         volumes = data['chart']['result'][0]['indicators']['quote'][0]['volume']
         opens = data['chart']['result'][0]['indicators']['quote'][0]['open']
         opens = self._round_of_list(opens)
@@ -61,7 +67,9 @@ class YahooFinance:
         highs = self._round_of_list(highs)
         df_dict = {'Open': opens, 'High': highs, 'Low': lows, 'Close': closes, 'Volume': volumes}
         df = pd.DataFrame(df_dict, index=timestamps)
-        df.index = pd.to_datetime(df.index)
+        ### Eddie fiexed
+        # df.index = pd.to_datetime(df.index)
+        df.index = pd.to_datetime(df.index, format='mixed')
         return df
 
     def _round_of_list(self, xlist):
