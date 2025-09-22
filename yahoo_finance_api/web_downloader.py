@@ -143,11 +143,20 @@ def _download_file(
     *,
     referer: Optional[str] = None,
     chunk_size: int = 8192,
-) -> DownloadedFile:
-    """Stream *url* to *destination* using *session*."""
+) -> Optional[DownloadedFile]:
+    """Stream *url* to *destination* using *session*.
+
+    If the remote server returns a ``404`` status code the download is skipped and
+    ``None`` is returned instead of raising an exception.
+    """
 
     headers = {"Referer": referer} if referer else None
     response = session.get(url, stream=True, timeout=30, headers=headers)
+
+    if response.status_code == 404:
+        response.close()
+        return None
+
     response.raise_for_status()
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +207,8 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
         filename = _filename_from_url(link)
         path = _ensure_unique_path(destination, filename)
         downloaded = _download_file(session, link, path, referer=url)
+        if downloaded is None:
+            continue
         downloaded_files.append(str(downloaded.destination))
 
     return downloaded_files
