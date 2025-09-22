@@ -29,6 +29,17 @@ import os
 import requests
 
 
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/114.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 class _LinkParser(HTMLParser):
     """HTML parser that collects ``href`` attributes from anchor tags."""
 
@@ -125,10 +136,18 @@ def _ensure_unique_path(directory: Path, filename: str) -> Path:
         counter += 1
 
 
-def _download_file(session: requests.Session, url: str, destination: Path, chunk_size: int = 8192) -> DownloadedFile:
+def _download_file(
+    session: requests.Session,
+    url: str,
+    destination: Path,
+    *,
+    referer: Optional[str] = None,
+    chunk_size: int = 8192,
+) -> DownloadedFile:
     """Stream *url* to *destination* using *session*."""
 
-    response = session.get(url, stream=True, timeout=30)
+    headers = {"Referer": referer} if referer else None
+    response = session.get(url, stream=True, timeout=30, headers=headers)
     response.raise_for_status()
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +187,7 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
     destination.mkdir(parents=True, exist_ok=True)
 
     session = requests.Session()
+    session.headers.update(_DEFAULT_HEADERS)
     response = session.get(url, timeout=30)
     response.raise_for_status()
 
@@ -177,7 +197,7 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
     for link in sorted(links):
         filename = _filename_from_url(link)
         path = _ensure_unique_path(destination, filename)
-        downloaded = _download_file(session, link, path)
+        downloaded = _download_file(session, link, path, referer=url)
         downloaded_files.append(str(downloaded.destination))
 
     return downloaded_files
