@@ -6,7 +6,8 @@ folder.  The downloader recognises common sharing patterns, including Google
 Drive ``open?id=...`` links, and converts them into direct downloads where
 possible.  The functionality is intentionally lightweight and only relies on
 the Python standard library plus the `requests` package that is already used by
-the project.
+the project.  Google Drive links that usually require a manual confirmation are
+also supported so long as they are publicly shared.
 
 Example
 -------
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
-from urllib.parse import parse_qs, urljoin, urlparse, unquote
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse, unquote
 
 import os
 
@@ -139,6 +140,17 @@ def _normalize_google_drive_url(url: str) -> str:
     return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 
+def _with_query_parameters(url: str, **params: str) -> str:
+    """Return *url* with the provided query ``params`` applied."""
+
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key, value in params.items():
+        query[key] = [value]
+    new_query = urlencode(query, doseq=True)
+    return urlunparse(parsed._replace(query=new_query))
+
+
 def _filename_from_url(url: str) -> str:
     """Derive a reasonable file name from *url*.
 
@@ -203,6 +215,22 @@ def _download_file(
         response.close()
         return None
 
+    if "drive.google.com" in urlparse(url).netloc:
+        confirm_token: Optional[str] = None
+        for cookie_name, cookie_value in response.cookies.items():
+            if cookie_name.startswith("download_warning"):
+                confirm_token = cookie_value
+                break
+        if confirm_token:
+            response.close()
+            confirmed_url = _with_query_parameters(url, confirm=confirm_token)
+            response = session.get(
+                confirmed_url, stream=True, timeout=30, headers=headers
+            )
+            if response.status_code == 404:
+                response.close()
+                return None
+
     response.raise_for_status()
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -236,7 +264,8 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
     Only ``http`` and ``https`` PDF resources are downloaded.  Duplicate links
     are ignored and files are saved under unique names to prevent accidental
     overwrites.  Google Drive sharing links are normalised to direct download
-    URLs so that ``open?id=...`` entries are treated like regular PDF files.
+    URLs so that ``open?id=...`` entries are treated like regular PDF files, and
+    confirmation prompts for large public files are retried automatically.
     """
 
     destination = Path(destination_dir)
