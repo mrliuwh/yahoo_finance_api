@@ -1,7 +1,7 @@
 """Utility helpers to scan a web page and download linked resources.
 
 This module provides a small helper that fetches a HTML page, extracts all
-links (``<a href=...>`` tags) and downloads the linked resources to a local
+links (``<a href=...>`` tags) and downloads the linked PDF resources to a local
 folder.  The functionality is intentionally lightweight and only relies on the
 Python standard library plus the `requests` package that is already used by the
 project.
@@ -91,6 +91,13 @@ def _extract_links(base_url: str, html: str) -> Set[str]:
         if parsed.scheme in {"http", "https"}:
             links.add(absolute)
     return links
+
+
+def _is_pdf_link(url: str) -> bool:
+    """Return ``True`` if *url* points to a PDF resource."""
+
+    parsed = urlparse(url)
+    return parsed.path.lower().endswith(".pdf")
 
 
 def _filename_from_url(url: str) -> str:
@@ -187,8 +194,8 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
 
     Notes
     -----
-    Only ``http`` and ``https`` resources are downloaded.  Duplicate links are
-    ignored and files are saved under unique names to prevent accidental
+    Only ``http`` and ``https`` PDF resources are downloaded.  Duplicate links
+    are ignored and files are saved under unique names to prevent accidental
     overwrites.
     """
 
@@ -204,6 +211,8 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
 
     downloaded_files: List[str] = []
     for link in sorted(links):
+        if not _is_pdf_link(link):
+            continue
         filename = _filename_from_url(link)
         path = _ensure_unique_path(destination, filename)
         downloaded = _download_file(session, link, path, referer=url)
