@@ -2,9 +2,11 @@
 
 This module provides a small helper that fetches a HTML page, extracts all
 links (``<a href=...>`` tags) and downloads the linked PDF resources to a local
-folder.  The functionality is intentionally lightweight and only relies on the
-Python standard library plus the `requests` package that is already used by the
-project.
+folder.  The downloader recognises common sharing patterns, including Google
+Drive ``open?id=...`` links, and converts them into direct downloads where
+possible.  The functionality is intentionally lightweight and only relies on
+the Python standard library plus the `requests` package that is already used by
+the project.
 
 Example
 -------
@@ -22,7 +24,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import parse_qs, urljoin, urlparse, unquote
 
 import os
 
@@ -97,7 +99,44 @@ def _is_pdf_link(url: str) -> bool:
     """Return ``True`` if *url* points to a PDF resource."""
 
     parsed = urlparse(url)
-    return parsed.path.lower().endswith(".pdf")
+    if parsed.path.lower().endswith(".pdf"):
+        return True
+
+    if parsed.netloc.endswith("drive.google.com"):
+        query = parse_qs(parsed.query)
+        if query.get("id"):
+            return True
+        parts = [part for part in parsed.path.split("/") if part]
+        if "d" in parts:
+            index = parts.index("d")
+            if index + 1 < len(parts):
+                return True
+
+    return False
+
+
+def _normalize_google_drive_url(url: str) -> str:
+    """Convert shared Google Drive links into direct download URLs."""
+
+    parsed = urlparse(url)
+    if not parsed.netloc.endswith("drive.google.com"):
+        return url
+
+    query = parse_qs(parsed.query)
+    file_id: Optional[str] = None
+    if query.get("id"):
+        file_id = query["id"][0]
+    else:
+        parts = [part for part in parsed.path.split("/") if part]
+        if "d" in parts:
+            index = parts.index("d")
+            if index + 1 < len(parts):
+                file_id = parts[index + 1]
+
+    if not file_id:
+        return url
+
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 
 def _filename_from_url(url: str) -> str:
@@ -196,7 +235,8 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
     -----
     Only ``http`` and ``https`` PDF resources are downloaded.  Duplicate links
     are ignored and files are saved under unique names to prevent accidental
-    overwrites.
+    overwrites.  Google Drive sharing links are normalised to direct download
+    URLs so that ``open?id=...`` entries are treated like regular PDF files.
     """
 
     destination = Path(destination_dir)
@@ -211,11 +251,12 @@ def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) 
 
     downloaded_files: List[str] = []
     for link in sorted(links):
-        if not _is_pdf_link(link):
+        normalized_link = _normalize_google_drive_url(link)
+        if not _is_pdf_link(normalized_link):
             continue
         filename = _filename_from_url(link)
         path = _ensure_unique_path(destination, filename)
-        downloaded = _download_file(session, link, path, referer=url)
+        downloaded = _download_file(session, normalized_link, path, referer=url)
         if downloaded is None:
             continue
         downloaded_files.append(str(downloaded.destination))
