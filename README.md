@@ -35,3 +35,63 @@ python setup.py install
 
 Make sure to use TICKER symbol from yahoo finance website
 https://in.finance.yahoo.com/ 
+
+## Forecast model example (Gradient Boosting)
+
+```python
+from yahoo_finance_api import StockForecastModel
+
+model = StockForecastModel(
+    stock_ticker="AAPL",
+    market_cap_usd=2_900_000_000_000,
+    category_label="technology"
+)
+
+artifacts = model.train()
+print("MAE:", artifacts.mae)
+print("R2:", artifacts.r2)
+print("Predicted next 1-month change:", model.predict_latest())
+```
+
+The model uses daily OHLCV, 20/120/200-day moving averages, price-weighted
+volume for 1-week and 1-month windows, weekly gold and VIX changes, and a
+large-cap (>10B) indicator with stock category encoding.
+
+
+You can also visualize historical trend with MA5, MA20, MA120:
+
+```python
+model.load_raw_data()
+ax = model.plot_historical_trend(window_size=250)
+```
+
+
+Backtest (walk-forward, predicted vs actual 1-month return):
+
+```python
+bt = model.backtest_predictions(min_train_size=252, step=1)
+ax = model.plot_backtest(min_train_size=252, step=1)
+```
+
+
+## Download latest stock list to CSV
+
+```python
+from yahoo_finance_api import download_stock_list_to_csv
+
+df = download_stock_list_to_csv("latest_us_stock_list.csv")
+print(df.head())
+```
+
+This CSV includes stock symbol list, exchange, market cap (market size), and stock category (sector).
+
+
+Use different metadata providers:
+
+```python
+# Yahoo (default)
+df = download_stock_list_to_csv("latest_us_stock_list.csv", metadata_source="yahoo")
+
+# Financial Modeling Prep (recommended fallback)
+df = download_stock_list_to_csv("latest_us_stock_list.csv", metadata_source="fmp", fmp_api_key="YOUR_KEY")
+```
