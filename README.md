@@ -106,3 +106,12 @@ print(metrics)  # {"mae": ..., "rmse": ..., "test_rows": ...}
 ax1 = model.plot_performance(test_size=0.2)
 ax2 = model.plot_prediction_scatter(test_size=0.2)
 ```
+
+
+Feature importance check:
+
+```python
+fi = model.get_feature_importance(top_n=20)
+print(fi.head(10))
+ax = model.plot_feature_importance(top_n=20)
+```

@@ -37,6 +37,7 @@ class StockForecastModel:
         self.data: Optional[pd.DataFrame] = None
         self.artifacts: Optional[ModelArtifacts] = None
         self._eval_cache: Optional[pd.DataFrame] = None
+        self._last_model: Optional[GradientBoostingRegressor] = None
 
     def load_raw_data(self) -> pd.DataFrame:
         stock = YahooFinanceClient(self.stock_ticker, self.history_range, "1d").fetch()
@@ -115,6 +116,7 @@ class StockForecastModel:
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
 
+        self._last_model = model
         self.artifacts = ModelArtifacts(
             model=model,
             feature_columns=list(X.columns),
@@ -177,6 +179,31 @@ class StockForecastModel:
         ax.plot([lim_low, lim_high], [lim_low, lim_high], "r--", linewidth=1)
         ax.set_title(f"{self.stock_ticker} Actual vs Predicted Scatter")
         ax.grid(alpha=0.3)
+        return ax
+
+
+    def get_feature_importance(self, top_n: int | None = None) -> pd.DataFrame:
+        """Return feature importances from the latest trained model."""
+        if self.artifacts is None or self._last_model is None:
+            self.train()
+
+        importance_df = pd.DataFrame({
+            "feature": self.artifacts.feature_columns,
+            "importance": self._last_model.feature_importances_,
+        }).sort_values("importance", ascending=False).reset_index(drop=True)
+
+        if top_n is not None:
+            return importance_df.head(top_n)
+        return importance_df
+
+    def plot_feature_importance(self, top_n: int = 20):
+        """Plot top-N feature importances from the trained model."""
+        fi = self.get_feature_importance(top_n=top_n).iloc[::-1]
+        ax = fi.plot.barh(x="feature", y="importance", figsize=(10, max(4, int(top_n * 0.35))))
+        ax.set_title(f"{self.stock_ticker} Feature Importance (Top {min(top_n, len(fi))})")
+        ax.set_xlabel("Importance")
+        ax.set_ylabel("Feature")
+        ax.grid(axis="x", alpha=0.3)
         return ax
 
     def backtest_predictions(self, min_train_size: int = 252, step: int = 1) -> pd.DataFrame:
