@@ -10,8 +10,8 @@ import requests
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
-FMP_PROFILE_URL = "https://financialmodelingprep.com/api/v3/profile"
-
+# FMP_PROFILE_URL = "https://financialmodelingprep.com/api/v3/profile"
+FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile?symbol="
 
 def _read_symbol_file(url: str, symbol_col: str) -> pd.DataFrame:
     response = requests.get(url, timeout=30)
@@ -90,7 +90,7 @@ def enrich_with_yahoo_metadata(symbols_df: pd.DataFrame, batch_size: int = 200) 
     return merged
 
 
-def enrich_with_fmp_metadata(symbols_df: pd.DataFrame, api_key: str | None = None, batch_size: int = 100) -> pd.DataFrame:
+def enrich_with_fmp_metadata(symbols_df: pd.DataFrame, api_key: str | None = None, batch_size: int = 1) -> pd.DataFrame:
     """Add market cap and category from Financial Modeling Prep profiles API."""
     resolved_key = api_key or os.getenv("FMP_API_KEY")
     if not resolved_key:
@@ -99,7 +99,8 @@ def enrich_with_fmp_metadata(symbols_df: pd.DataFrame, api_key: str | None = Non
     records: list[dict] = []
     for batch in _chunks(symbols_df["symbol"].tolist(), batch_size):
         symbols = ",".join(batch)
-        url = f"{FMP_PROFILE_URL}/{symbols}"
+        url = f"{FMP_PROFILE_URL}{symbols}"
+        # print(url)
         try:
             response = requests.get(url, params={"apikey": resolved_key}, timeout=30)
             response.raise_for_status()
