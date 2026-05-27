@@ -1,0 +1,314 @@
+"""Utility helpers to scan a web page and download linked resources.
+
+This module provides a small helper that fetches a HTML page, extracts all
+links (``<a href=...>`` tags) and downloads the linked PDF resources to a local
+folder.  The downloader recognises common sharing patterns, including Google
+Drive ``open?id=...`` links, and converts them into direct downloads where
+possible.  The functionality is intentionally lightweight and only relies on
+the Python standard library plus the `requests` package that is already used by
+the project.  Google Drive links that usually require a manual confirmation are
+also supported so long as they are publicly shared.
+
+Example
+-------
+
+>>> from yahoo_finance_api.web_downloader import download_links_from_page
+>>> download_links_from_page("https://example.com", "./downloads")
+['downloads/index.html', 'downloads/license.txt']
+
+The function returns the list of downloaded file paths which makes it easy to
+inspect the result or perform additional processing.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Iterable, List, Optional, Set
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse, unquote
+
+import os
+
+import requests
+
+
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/114.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+class _LinkParser(HTMLParser):
+    """HTML parser that collects ``href`` attributes from anchor tags."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: Set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: Iterable[tuple[str, Optional[str]]]) -> None:
+        if tag.lower() != "a":
+            return
+        for attr, value in attrs:
+            if attr.lower() == "href" and value:
+                self.links.add(value)
+
+
+@dataclass(frozen=True)
+class DownloadedFile:
+    """Represents a single downloaded file."""
+
+    source_url: str
+    destination: Path
+
+    def __str__(self) -> str:  # pragma: no cover - human readable helper
+        return str(self.destination)
+
+
+def _extract_links(base_url: str, html: str) -> Set[str]:
+    """Extract and normalize hyperlinks from *html*.
+
+    Parameters
+    ----------
+    base_url:
+        URL of the HTML page which is used to resolve relative links.
+    html:
+        HTML markup as returned by :func:`requests.Response.text`.
+
+    Returns
+    -------
+    set[str]
+        A set of absolute URLs pointing to linked resources.
+    """
+
+    parser = _LinkParser()
+    parser.feed(html)
+    links = set()
+    for href in parser.links:
+        absolute = urljoin(base_url, href)
+        parsed = urlparse(absolute)
+        if parsed.scheme in {"http", "https"}:
+            links.add(absolute)
+    return links
+
+
+def _is_pdf_link(url: str) -> bool:
+    """Return ``True`` if *url* points to a PDF resource."""
+
+    parsed = urlparse(url)
+    if parsed.path.lower().endswith(".pdf"):
+        return True
+
+    if parsed.netloc.endswith("drive.google.com"):
+        query = parse_qs(parsed.query)
+        if query.get("id"):
+            return True
+        parts = [part for part in parsed.path.split("/") if part]
+        if "d" in parts:
+            index = parts.index("d")
+            if index + 1 < len(parts):
+                return True
+
+    return False
+
+
+def _normalize_google_drive_url(url: str) -> str:
+    """Convert shared Google Drive links into direct download URLs."""
+
+    parsed = urlparse(url)
+    if not parsed.netloc.endswith("drive.google.com"):
+        return url
+
+    query = parse_qs(parsed.query)
+    file_id: Optional[str] = None
+    if query.get("id"):
+        file_id = query["id"][0]
+    else:
+        parts = [part for part in parsed.path.split("/") if part]
+        if "d" in parts:
+            index = parts.index("d")
+            if index + 1 < len(parts):
+                file_id = parts[index + 1]
+
+    if not file_id:
+        return url
+
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+def _with_query_parameters(url: str, **params: str) -> str:
+    """Return *url* with the provided query ``params`` applied."""
+
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key, value in params.items():
+        query[key] = [value]
+    new_query = urlencode(query, doseq=True)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+def _filename_from_url(url: str) -> str:
+    """Derive a reasonable file name from *url*.
+
+    The function inspects the URL path and query string.  If the URL does not
+    contain a file name, a generic name is generated to avoid collisions.
+    """
+
+    parsed = urlparse(url)
+    path_name = Path(unquote(parsed.path)).name
+    if not path_name:
+        path_name = parsed.netloc.replace(":", "_")
+
+    if parsed.query:
+        safe_query = parsed.query.replace("/", "_").replace("&", "_")
+        if path_name:
+            path_name = f"{path_name}_{safe_query}"
+        else:
+            path_name = safe_query
+
+    if not path_name:
+        path_name = "downloaded_file"
+
+    return path_name
+
+
+def _ensure_unique_path(directory: Path, filename: str) -> Path:
+    """Return a path that does not clobber existing files."""
+
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    counter = 1
+    while True:
+        new_name = f"{stem}_{counter}{suffix}"
+        candidate = directory / new_name
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _download_file(
+    session: requests.Session,
+    url: str,
+    destination: Path,
+    *,
+    referer: Optional[str] = None,
+    chunk_size: int = 8192,
+) -> Optional[DownloadedFile]:
+    """Stream *url* to *destination* using *session*.
+
+    If the remote server returns a ``404`` status code the download is skipped and
+    ``None`` is returned instead of raising an exception.
+    """
+
+    headers = {"Referer": referer} if referer else None
+    response = session.get(url, stream=True, timeout=30, headers=headers)
+
+    if response.status_code == 404:
+        response.close()
+        return None
+
+    if "drive.google.com" in urlparse(url).netloc:
+        confirm_token: Optional[str] = None
+        for cookie_name, cookie_value in response.cookies.items():
+            if cookie_name.startswith("download_warning"):
+                confirm_token = cookie_value
+                break
+        if confirm_token:
+            response.close()
+            confirmed_url = _with_query_parameters(url, confirm=confirm_token)
+            response = session.get(
+                confirmed_url, stream=True, timeout=30, headers=headers
+            )
+            if response.status_code == 404:
+                response.close()
+                return None
+
+    response.raise_for_status()
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as file_handle:
+        for chunk in response.iter_content(chunk_size=chunk_size):
+            if chunk:  # filter out keep-alive chunks
+                file_handle.write(chunk)
+
+    return DownloadedFile(source_url=url, destination=destination)
+
+
+def download_links_from_page(url: str, destination_dir: str | os.PathLike[str]) -> List[str]:
+    """Download all links referenced by the HTML page at *url*.
+
+    Parameters
+    ----------
+    url:
+        Address of the web page to scan.
+    destination_dir:
+        Directory on the local filesystem where downloaded files should be
+        stored.  The directory is created automatically if it does not already
+        exist.
+
+    Returns
+    -------
+    list[str]
+        A list of absolute paths to the downloaded files.
+
+    Notes
+    -----
+    Only ``http`` and ``https`` PDF resources are downloaded.  Duplicate links
+    are ignored and files are saved under unique names to prevent accidental
+    overwrites.  Google Drive sharing links are normalised to direct download
+    URLs so that ``open?id=...`` entries are treated like regular PDF files, and
+    confirmation prompts for large public files are retried automatically.
+    """
+
+    destination = Path(destination_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    session = requests.Session()
+    session.headers.update(_DEFAULT_HEADERS)
+    response = session.get(url, timeout=30)
+    response.raise_for_status()
+
+    links = _extract_links(url, response.text)
+
+    downloaded_files: List[str] = []
+    for link in sorted(links):
+        normalized_link = _normalize_google_drive_url(link)
+        if not _is_pdf_link(normalized_link):
+            continue
+        filename = _filename_from_url(link)
+        path = _ensure_unique_path(destination, filename)
+        downloaded = _download_file(session, normalized_link, path, referer=url)
+        if downloaded is None:
+            continue
+        downloaded_files.append(str(downloaded.destination))
+
+    return downloaded_files
+
+
+def main() -> None:  # pragma: no cover - convenience CLI wrapper
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Download all links from a web page.")
+    parser.add_argument("url", help="URL of the web page to scan")
+    parser.add_argument("destination", help="Directory where files should be stored")
+    args = parser.parse_args()
+
+    try:
+        files = download_links_from_page(args.url, args.destination)
+    except requests.RequestException as exc:  # pragma: no cover - user feedback path
+        parser.exit(1, f"Error downloading data: {exc}\n")
+
+    for file_path in files:
+        print(file_path)
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    main()
